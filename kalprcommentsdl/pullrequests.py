@@ -3,6 +3,7 @@
 import os
 import gettext
 import logging
+import re
 
 from tempfile import mkstemp
 from mako.template import Template
@@ -26,9 +27,8 @@ localedir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'i18n')
 translate = gettext.translation('kalprcommentsdl', localedir, ['ja'], fallback=True)
 _ = translate.ugettext
 
-class CommentsDownload(IRoute, ITemplatePullrequests):
 
-    log.info('CommentsDownload: class')
+class CommentsDownload(IRoute, ITemplatePullrequests):
 
     def __init__(self):
         pass
@@ -76,7 +76,7 @@ class CommentsDownload(IRoute, ITemplatePullrequests):
 </div>
 <div class="input">
   <div>
-    <a class="btn btn-small" href="${{h.url('pullrequest_export',repo_name=c.repo_name,pull_request_id=c.pull_request.pull_request_id,fname='pullrequest.xlsx')}}"><i class="icon-doc-inv"></i> {button}</a>
+    <a class="btn btn-small" href="${{h.url('pullrequest_export',repo_name=c.repo_name,pull_request_id=c.pull_request.pull_request_id,fname='pullrequest.xlsx')}}"><i class="icon-file-excel"></i> {button}</a>
   </div>
 </div>
 """.format(**data)
@@ -130,14 +130,37 @@ class CommentsDownload(IRoute, ITemplatePullrequests):
         ws['K1'].value = _('Deadline')
 
         align_rot_90 = Alignment(text_rotation=90)
-        align_wrap = Alignment(wrap_text=True)
+        align_wrap = Alignment(wrap_text=True, vertical='top')
 
         rows = 2
         for f_path, lines in sorted_file_comments_by_name:
             sorted_inline_comments_by_lineno = sorted(lines.iteritems(), key=lambda (line_no,comments):int(line_no[1:]), reverse=False)
             base_rows = rows
             for line_no, comments in sorted_inline_comments_by_lineno:
+                top_comments = {}
+                reply_comments = {}
                 for co in comments:
+                    m = re.match(r'`replyto comment-(?P<replyto>[\d]+)', co.text)
+                    if m:
+                        replyto = int(m.group('replyto'))
+                        if reply_comments.get(replyto, None) is None:
+                            reply_comments[replyto] = []
+                        reply_comments[replyto].append(co)
+                    else:
+                        top_comments[co.comment_id] = co
+
+                def _make_threaded_message(comment_id, stops=0):
+                    message = '\n' if stops > 0 else ''
+                    for reply in reply_comments.get(comment_id, []):
+                        text = re.sub(r'`replyto comment-(?:[\d]+) <#comment-(?:[\d]+)>`_ :', '', reply.text)
+                        indent = ' ' * 2 * stops
+                        message += '{indent}commented by {author}:\n'.format(indent=indent, author=reply.author.username)
+                        message += '\n'.join(indent + line for line in text.splitlines() if len(line) > 0)
+                        message += '\n{indent}----'.format(indent=indent)
+                        message += _make_threaded_message(reply.comment_id, stops + 1)
+                    return message
+
+                for comment_id, co in top_comments.items():
                     link = pr.url(canonical=True, anchor='comment-{id}'.format(id=co.comment_id))
                     ws['B{row}'.format(row=rows)].value = co.comment_id
                     ws['B{row}'.format(row=rows)].hyperlink = link
@@ -150,6 +173,7 @@ class CommentsDownload(IRoute, ITemplatePullrequests):
                         ws['F{row}'.format(row=rows)].value = str(h.changeset_status_lbl(co.status_change[0].status))
                     ws['G{row}'.format(row=rows)].value = co.text.replace('@', '(at)')
                     ws['G{row}'.format(row=rows)].alignment = align_wrap
+                    ws['H{row}'.format(row=rows)].value = _make_threaded_message(comment_id).replace('@', '(at)')
                     ws['H{row}'.format(row=rows)].alignment = align_wrap
                     rows += 1
             ws.merge_cells('A{start}:A{end}'.format(start=base_rows, end=rows-1))
@@ -159,7 +183,30 @@ class CommentsDownload(IRoute, ITemplatePullrequests):
 
         ws['A{row}'.format(row=rows)].value = 'General'
         base_rows = rows
+        top_comments = {}
+        reply_comments = {}
         for co in general_comments:
+            m = re.match(r'`replyto comment-(?P<replyto>[\d]+)', co.text)
+            if m:
+                replyto = int(m.group('replyto'))
+                if reply_comments.get(replyto, None) is None:
+                    reply_comments[replyto] = []
+                reply_comments[replyto].append(co)
+            else:
+                top_comments[co.comment_id] = co
+
+        def _make_threaded_message(comment_id, stops=0):
+            message = '\n' if stops > 0 else ''
+            for reply in reply_comments.get(comment_id, []):
+                text = re.sub(r'`replyto comment-(?:[\d]+) <#comment-(?:[\d]+)>`_ :', '', reply.text)
+                indent = ' ' * 2 * stops
+                message += '{indent}commented by {author}:\n'.format(indent=indent, author=reply.author.username)
+                message += '\n'.join(indent + line for line in text.splitlines() if len(line) > 0)
+                message += '\n{indent}----'.format(indent=indent)
+                message += _make_threaded_message(reply.comment_id, stops + 1)
+            return message
+
+        for comment_id, co in top_comments.items():
             link = pr.url(canonical=True, anchor='comment-{id}'.format(id=co.comment_id))
             ws['B{row}'.format(row=rows)].value = co.comment_id
             ws['B{row}'.format(row=rows)].hyperlink = link
@@ -168,6 +215,7 @@ class CommentsDownload(IRoute, ITemplatePullrequests):
                 ws['F{row}'.format(row=rows)].value = str(h.changeset_status_lbl(co.status_change[0].status))
             ws['G{row}'.format(row=rows)].value = co.text.replace('@', '(at)')
             ws['G{row}'.format(row=rows)].alignment = align_wrap
+            ws['H{row}'.format(row=rows)].value = _make_threaded_message(comment_id).replace('@', '(at)')
             ws['H{row}'.format(row=rows)].alignment = align_wrap
             rows += 1
         ws.merge_cells('A{start}:A{end}'.format(start=base_rows, end=rows-1))
